@@ -1,908 +1,469 @@
 Option Explicit
 
-' Constants for thresholds and chart dimensions
-Private Const DAYS_THRESHOLD_1 As Long = 7
-Private Const DAYS_THRESHOLD_2 As Long = 14
-Private Const CHART_WIDTH As Long = 600
-Private Const CHART_HEIGHT As Long = 300
+' =============================================================================
+' DATE ANALYSIS MACRO - SIMPLIFIED VERSION
+' =============================================================================
+' Purpose: Analyze task completion times by person and month
+' Input: Data sheet with columns A=keyword, B=name, C=start date, D=end date
+' Output: Monthly summary tables and chart showing on-time percentages
+' =============================================================================
 
-Function WeekOfMonth(ByVal d As Date) As Long
-    ' Calculates the week number within a given month.
-    ' Returns 0 if invalid date
-    If d = 0 Then
-        WeekOfMonth = 0
-        Exit Function
-    End If
+' Configuration - Change these values as needed
+Private Const START_DATE As String = "01/01/2025"        ' Analysis start date
+Private Const END_DATE As String = "08/25/2025"          ' Analysis end date
+Private Const NAME_COLUMN As String = "B"                ' Column containing person names
+Private Const START_DATE_COLUMN As String = "C"          ' Column containing task start dates
+Private Const END_DATE_COLUMN As String = "D"            ' Column containing task end dates
+Private Const KEYWORD_COLUMN As String = "A"             ' Column containing keywords for filtering
+Private Const KEYWORD_TO_FILTER As String = "tech"       ' Filter by this keyword (leave empty for all)
+Private Const DAYS_THRESHOLD_1 As Long = 7               ' "On time" threshold (days)
+Private Const DAYS_THRESHOLD_2 As Long = 14              ' "Acceptable" threshold (days)
 
-    Dim firstDay As Date
-    firstDay = DateSerial(Year(d), Month(d), 1)
-
-    ' Calculate the week number based on the first day of the month
-    WeekOfMonth = Int((Day(d) - 1 + Weekday(firstDay, vbMonday) - 1) / 7) + 1
-End Function
-
-Private Function IsValidDateRange(startDate As Date, endDate As Date) As Boolean
-    ' Validates that dates are valid and in correct order
-    IsValidDateRange = (startDate > 0 And endDate > 0 And startDate <= endDate)
-End Function
-
-Private Function GetOrCreateDictionary(dict As Object, key As String) As Object
-    ' Helper function to get or create nested dictionary
-    If Not dict.Exists(key) Then
-        Set dict(key) = CreateObject("Scripting.Dictionary")
-    End If
-    Set GetOrCreateDictionary = dict(key)
-End Function
-
-Sub AnalyzeDatesWithFinalMetricsAndChart()
-    ' Define variables
+Sub AnalyzeDatesWithMonthlyOutputsAndStackedHistogram()
+    ' =============================================================================
+    ' MAIN VARIABLES - All variables declared up front for clarity
+    ' =============================================================================
+    
+    ' Worksheet objects
     Dim wsData As Worksheet, wsOutput As Worksheet
-    Dim lastRow As Long, currentRow As Long
-    Dim dateDiff As Long
+    
+    ' Date variables
     Dim startDate As Date, endDate As Date
-    Dim nameKey As String, monthKey As String, weekNumber As Long
-    Dim chartSheet As Worksheet
-
-    ' Dictionaries for monthly and weekly totals
-    Dim dictMonthly7Days As Object, dictMonthly14Days As Object, dictMonthly14PlusDays As Object
-    Dim dictWeekly7Days As Object, dictWeekly14Days As Object, dictWeekly14PlusDays As Object
-    Dim dictTotalCounts As Object
-
-    ' Arrays to store monthly data for charting
-    Dim namesArray() As String
-    Dim datesArray() As String
-    Dim percentagesArray() As Double
-    Dim nameIndex As Object, dateIndex As Object
-    Dim totalNames As Long, totalMonths As Long
-
-    ' Variables for improved processing
-    Dim dateInput As String
-    Dim invalidRows As Long
-
-    ' Store original application settings
-    Dim origScreenUpdating As Boolean
-    Dim origCalculation As XlCalculation
-    Dim origEnableEvents As Boolean
-
-    origScreenUpdating = Application.ScreenUpdating
-    origCalculation = Application.Calculation
-    origEnableEvents = Application.EnableEvents
-
-    ' Optimize Excel settings for performance
+    Dim cellStartDate As Variant, cellEndDate As Variant
+    
+    ' Loop counters and data processing
+    Dim lastRow As Long, currentRow As Long, outputRow As Long
+    Dim dateDiff As Long, invalidRows As Long
+    Dim nameKey As String, monthKey As String
+    
+    ' Data storage dictionaries - think of these as smart tables that auto-expand
+    Dim dictMonthly7Days As Object      ' Stores count of tasks <= 7 days by person/month
+    Dim dictMonthly14Days As Object     ' Stores count of tasks <= 14 days by person/month
+    Dim dictMonthly14PlusDays As Object ' Stores count of tasks > 14 days by person/month
+    Dim allNames As Object              ' List of all unique person names
+    Dim allMonths As Object             ' List of all unique months
+    
+    ' Arrays for sorted data
+    Dim sortedMonths() As String, nameKeys() As String
+    Dim idx As Long, nameIdx As Long
+    
+    ' Calculation variables
+    Dim count7 As Long, count14 As Long, count14Plus As Long, totalCount As Long
+    Dim percentageOnTime As Double
+    
+    ' Chart variables
+    Dim co As ChartObject, chartDataRange As Range
+    Dim seriesIndex As Long, colorIndex As Long
+    
+    ' =============================================================================
+    ' SETUP AND INITIALIZATION
+    ' =============================================================================
+    
+    ' Turn off screen updating for better performance
     Application.ScreenUpdating = False
-    Application.Calculation = xlCalculationManual
-    Application.EnableEvents = False
-
-    ' Check if Data sheet exists
-    On Error GoTo SheetError
+    
+    ' Convert date strings to actual dates
+    startDate = CDate(START_DATE)
+    endDate = CDate(END_DATE)
+    
+    ' Get the source data worksheet
     Set wsData = ThisWorkbook.Sheets("Data")
-    On Error GoTo 0
-
-    ' Get date range from user with improved error handling
-    On Error GoTo InvalidDateInput
-    dateInput = Application.InputBox("Enter the start date (MM/DD/YYYY):", "Start Date", Type:=2)
-    If dateInput = "False" Or dateInput = "" Then GoTo Canceled
-    startDate = CDate(dateInput)
-
-    dateInput = Application.InputBox("Enter the end date (MM/DD/YYYY):", "End Date", Type:=2)
-    If dateInput = "False" Or dateInput = "" Then GoTo Canceled
-    endDate = CDate(dateInput)
-    On Error GoTo 0
-
-    ' Validate date range
-    If Not IsValidDateRange(startDate, endDate) Then
-        MsgBox "Invalid date range. Start date must be before or equal to end date.", vbExclamation
-        GoTo CleanUp
-    End If
-
-    ' Initialize dictionaries
+    
+    ' Create dictionaries to store our data (like expandable tables)
     Set dictMonthly7Days = CreateObject("Scripting.Dictionary")
     Set dictMonthly14Days = CreateObject("Scripting.Dictionary")
     Set dictMonthly14PlusDays = CreateObject("Scripting.Dictionary")
-    Set dictWeekly7Days = CreateObject("Scripting.Dictionary")
-    Set dictWeekly14Days = CreateObject("Scripting.Dictionary")
-    Set dictWeekly14PlusDays = CreateObject("Scripting.Dictionary")
-    Set dictTotalCounts = CreateObject("Scripting.Dictionary")
-
-    ' Find last row with data
-    lastRow = wsData.Cells(wsData.Rows.Count, "A").End(xlUp).Row
+    Set allNames = CreateObject("Scripting.Dictionary")
+    Set allMonths = CreateObject("Scripting.Dictionary")
+    
+    ' Find the last row with data in the name column
+    lastRow = wsData.Cells(wsData.Rows.Count, NAME_COLUMN).End(xlUp).row
     invalidRows = 0
-
-    ' Process data with validation and progress indicator
-    For currentRow = 2 To lastRow
-        ' Update status bar for large datasets
-        If currentRow Mod 100 = 0 Then
-            Application.StatusBar = "Processing row " & currentRow & " of " & lastRow & "..."
-        End If
-
-        ' Validate row data
-        On Error Resume Next
-        Dim cellA As Variant, cellB As Variant, cellC As Variant, cellD As Variant
-        cellA = wsData.Cells(currentRow, "A").Value
-        cellB = wsData.Cells(currentRow, "B").Value
-        cellC = wsData.Cells(currentRow, "C").Value
-        cellD = wsData.Cells(currentRow, "D").Value
-        On Error GoTo 0
-
-        ' Skip if invalid data or does not contain "pizza" in column D
-        If cellA = "" Or Not IsDate(cellB) Or Not IsDate(cellC) Or Not IsEmpty(cellD) And InStr(1, CStr(cellD), "pizza", vbTextCompare) = 0 Then
+    
+    ' =============================================================================
+    ' DATA PROCESSING LOOP - Read each row and categorize the data
+    ' =============================================================================
+    
+    For currentRow = 2 To lastRow ' Start at row 2 (skip headers)
+        
+        ' Get data from current row - using configurable column constants
+        Dim cellName As Variant: cellName = wsData.Cells(currentRow, NAME_COLUMN).Value           ' Person name
+        cellStartDate = wsData.Cells(currentRow, START_DATE_COLUMN).Value                         ' Task start date
+        cellEndDate = wsData.Cells(currentRow, END_DATE_COLUMN).Value                             ' Task end date
+        Dim cellKeyword As Variant: cellKeyword = wsData.Cells(currentRow, KEYWORD_COLUMN).Value  ' Keyword filter
+        
+        ' Skip this row if data is invalid
+        If IsEmpty(cellName) Or Not IsDate(cellStartDate) Or Not IsDate(cellEndDate) Then
             invalidRows = invalidRows + 1
             GoTo NextRow
         End If
-
-        If CDate(cellB) >= startDate And CDate(cellB) <= endDate Then
-            dateDiff = CDate(cellC) - CDate(cellB)
-            nameKey = CStr(cellA)
-            monthKey = Format(CDate(cellB), "YYYY-MM")
-            weekNumber = WeekOfMonth(CDate(cellB))
-
-            ' Initialize dictionary with default structure if it doesn't exist
-            If Not dictTotalCounts.Exists(nameKey) Then
-                Set dictTotalCounts(nameKey) = CreateObject("Scripting.Dictionary")
-                dictTotalCounts(nameKey).Add "Less7", 0
-                dictTotalCounts(nameKey).Add "Less14", 0
-                dictTotalCounts(nameKey).Add "Greater14", 0
+        
+        ' Apply keyword filter (skip if doesn't match)
+        If KEYWORD_TO_FILTER <> "" Then
+            If InStr(1, LCase(CStr(cellKeyword)), LCase(KEYWORD_TO_FILTER)) = 0 Then
+                invalidRows = invalidRows + 1
+                GoTo NextRow
             End If
-
+        End If
+        
+        ' Only process data within our date range
+        If CDate(cellStartDate) >= startDate And CDate(cellStartDate) <= endDate Then
+            
+            ' Calculate how many days the task took
+            dateDiff = CDate(cellEndDate) - CDate(cellStartDate)
+            
+            ' Create keys for organizing data
+            nameKey = CStr(cellName)                                    ' Person's name
+            monthKey = Format(CDate(cellStartDate), "YYYY-MM")          ' Month in YYYY-MM format
+            
+            ' Remember this person and month for later
+            allNames(nameKey) = True
+            allMonths(monthKey) = True
+            
+            ' Create nested dictionaries if they don't exist (Person -> Month -> Count)
+            If Not dictMonthly7Days.Exists(nameKey) Then Set dictMonthly7Days(nameKey) = CreateObject("Scripting.Dictionary")
+            If Not dictMonthly14Days.Exists(nameKey) Then Set dictMonthly14Days(nameKey) = CreateObject("Scripting.Dictionary")
+            If Not dictMonthly14PlusDays.Exists(nameKey) Then Set dictMonthly14PlusDays(nameKey) = CreateObject("Scripting.Dictionary")
+            
+            ' Categorize the task based on how long it took and increment counters
             If dateDiff <= DAYS_THRESHOLD_1 Then
-                ' Process <= 7 days
-                If Not dictMonthly7Days.Exists(nameKey) Then Set dictMonthly7Days(nameKey) = CreateObject("Scripting.Dictionary")
-                If Not dictMonthly7Days(nameKey).Exists(monthKey) Then dictMonthly7Days(nameKey).Add monthKey, 0
+                ' Task completed within 7 days - "On time"
+                If Not dictMonthly7Days(nameKey).Exists(monthKey) Then dictMonthly7Days(nameKey)(monthKey) = 0
                 dictMonthly7Days(nameKey)(monthKey) = dictMonthly7Days(nameKey)(monthKey) + 1
-
-                If Not dictWeekly7Days.Exists(nameKey) Then Set dictWeekly7Days(nameKey) = CreateObject("Scripting.Dictionary")
-                Dim weekKey7 As String
-                weekKey7 = monthKey & "_Week_" & weekNumber
-                If Not dictWeekly7Days(nameKey).Exists(weekKey7) Then dictWeekly7Days(nameKey).Add weekKey7, 0
-                dictWeekly7Days(nameKey)(weekKey7) = dictWeekly7Days(nameKey)(weekKey7) + 1
-
-                dictTotalCounts(nameKey)("Less7") = dictTotalCounts(nameKey)("Less7") + 1
-
+                
             ElseIf dateDiff <= DAYS_THRESHOLD_2 Then
-                ' Process <= 14 days
-                If Not dictMonthly14Days.Exists(nameKey) Then Set dictMonthly14Days(nameKey) = CreateObject("Scripting.Dictionary")
-                If Not dictMonthly14Days(nameKey).Exists(monthKey) Then dictMonthly14Days(nameKey).Add monthKey, 0
+                ' Task completed within 8-14 days - "Acceptable"
+                If Not dictMonthly14Days(nameKey).Exists(monthKey) Then dictMonthly14Days(nameKey)(monthKey) = 0
                 dictMonthly14Days(nameKey)(monthKey) = dictMonthly14Days(nameKey)(monthKey) + 1
-
-                If Not dictWeekly14Days.Exists(nameKey) Then Set dictWeekly14Days(nameKey) = CreateObject("Scripting.Dictionary")
-                Dim weekKey14 As String
-                weekKey14 = monthKey & "_Week_" & weekNumber
-                If Not dictWeekly14Days(nameKey).Exists(weekKey14) Then dictWeekly14Days(nameKey).Add weekKey14, 0
-                dictWeekly14Days(nameKey)(weekKey14) = dictWeekly14Days(nameKey)(weekKey14) + 1
-
-                dictTotalCounts(nameKey)("Less14") = dictTotalCounts(nameKey)("Less14") + 1
-
+                
             Else
-                ' Process > 14 days
-                If Not dictMonthly14PlusDays.Exists(nameKey) Then Set dictMonthly14PlusDays(nameKey) = CreateObject("Scripting.Dictionary")
-                If Not dictMonthly14PlusDays(nameKey).Exists(monthKey) Then dictMonthly14PlusDays(nameKey).Add monthKey, 0
+                ' Task took more than 14 days - "Late"
+                If Not dictMonthly14PlusDays(nameKey).Exists(monthKey) Then dictMonthly14PlusDays(nameKey)(monthKey) = 0
                 dictMonthly14PlusDays(nameKey)(monthKey) = dictMonthly14PlusDays(nameKey)(monthKey) + 1
-
-                If Not dictWeekly14PlusDays.Exists(nameKey) Then Set dictWeekly14PlusDays(nameKey) = CreateObject("Scripting.Dictionary")
-                Dim weekKeyPlus As String
-                weekKeyPlus = monthKey & "_Week_" & weekNumber
-                If Not dictWeekly14PlusDays(nameKey).Exists(weekKeyPlus) Then dictWeekly14PlusDays(nameKey).Add weekKeyPlus, 0
-                dictWeekly14PlusDays(nameKey)(weekKeyPlus) = dictWeekly14PlusDays(nameKey)(weekKeyPlus) + 1
-
-                dictTotalCounts(nameKey)("Greater14") = dictTotalCounts(nameKey)("Greater14") + 1
             End If
         End If
 NextRow:
     Next currentRow
-
-    ' Clear status bar
-    Application.StatusBar = False
-
-    ' Create new output sheet or clear existing one
+    
+    ' =============================================================================
+    ' CREATE OUTPUT WORKSHEET
+    ' =============================================================================
+    
+    ' Delete old results sheet if it exists, then create new one
     On Error Resume Next
-    Set wsOutput = ThisWorkbook.Sheets("DateRangeSummary")
-    If Not wsOutput Is Nothing Then
-        Application.DisplayAlerts = False
-        wsOutput.Delete
-        Application.DisplayAlerts = True
-    End If
+    ThisWorkbook.Sheets("MonthlySummary").Delete
     On Error GoTo 0
-
-    Set wsOutput = ThisWorkbook.Sheets.Add(After:=wsData)
-    wsOutput.Name = "DateRangeSummary"
-
-    ' Delete any existing charts in the new sheet
-    Dim co As ChartObject
-    For Each co In wsOutput.ChartObjects
-        co.Delete
-    Next co
-
-    ' --- Output Monthly/Weekly Data ---
-    Dim allNames As Object, allMonths As Object, allWeeks As Object
-    Set allNames = CreateObject("Scripting.Dictionary")
-
-    ' Declare variables properly
-    Dim nameVar As Variant, subKeyVar As Variant, monthVar As Variant, weekVar As Variant
-
-    ' Collect all unique names
-    For Each nameVar In dictMonthly7Days.Keys: allNames(nameVar) = True: Next
-    For Each nameVar In dictMonthly14Days.Keys: allNames(nameVar) = True: Next
-    For Each nameVar In dictMonthly14PlusDays.Keys: allNames(nameVar) = True: Next
-    For Each nameVar In dictWeekly7Days.Keys: allNames(nameVar) = True: Next
-    For Each nameVar In dictWeekly14Days.Keys: allNames(nameVar) = True: Next
-    For Each nameVar In dictWeekly14PlusDays.Keys: allNames(nameVar) = True: Next
-
-    Dim outputRow As Long
+    Set wsOutput = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets("Data"))
+    wsOutput.name = "MonthlySummary"
+    
+    ' =============================================================================
+    ' CREATE SORTED ARRAYS - Convert dictionary keys to sorted arrays for consistent output
+    ' =============================================================================
+    
+    ' Create sorted array of months
+    If allMonths.Count > 0 Then
+        ReDim sortedMonths(0 To allMonths.Count - 1)
+        idx = 0
+        Dim monthVar As Variant
+        For Each monthVar In allMonths.Keys
+            sortedMonths(idx) = CStr(monthVar)
+            idx = idx + 1
+        Next
+        SortStringArray sortedMonths ' Sort chronologically
+    End If
+    
+    ' Create sorted array of names
+    If allNames.Count > 0 Then
+        ReDim nameKeys(0 To allNames.Count - 1)
+        idx = 0
+        Dim nameVar As Variant
+        For Each nameVar In allNames.Keys
+            nameKeys(idx) = CStr(nameVar)
+            idx = idx + 1
+        Next
+        SortStringArray nameKeys ' Sort alphabetically
+    End If
+    
+    ' =============================================================================
+    ' WRITE MONTHLY SUMMARY TABLES - The main output tables
+    ' =============================================================================
+    
+    ' Write main table headers
     outputRow = 1
-
-    ' Monthly data headers
     wsOutput.Cells(outputRow, 1).Value = "Name"
     wsOutput.Cells(outputRow, 2).Value = "Period"
     wsOutput.Cells(outputRow, 3).Value = "<= 7 Days"
     wsOutput.Cells(outputRow, 4).Value = "<= 14 Days"
     wsOutput.Cells(outputRow, 5).Value = "> 14 Days"
-    wsOutput.Cells(outputRow, 6).Value = "Percentage Late"
-
+    wsOutput.Cells(outputRow, 6).Value = "Percentage On Time"
+    
     ' Format headers
     With wsOutput.Range("A1:F1")
         .Font.Bold = True
         .Interior.Color = RGB(200, 200, 200)
     End With
     outputRow = outputRow + 1
-
-    ' Process monthly data - collect all data first
-    Dim monthlyData As Object
-    Set monthlyData = CreateObject("Scripting.Dictionary")
-
-    For Each nameVar In allNames.Keys
-        nameKey = CStr(nameVar)
-        Set allMonths = CreateObject("Scripting.Dictionary")
-
-        If dictMonthly7Days.Exists(nameKey) Then
-            For Each subKeyVar In dictMonthly7Days(nameKey).Keys: allMonths(subKeyVar) = True: Next
-        End If
-        If dictMonthly14Days.Exists(nameKey) Then
-            For Each subKeyVar In dictMonthly14Days(nameKey).Keys: allMonths(subKeyVar) = True: Next
-        End If
-        If dictMonthly14PlusDays.Exists(nameKey) Then
-            For Each subKeyVar In dictMonthly14PlusDays(nameKey).Keys: allMonths(subKeyVar) = True: Next
-        End If
-
-        For Each monthVar In allMonths.Keys
-            monthKey = CStr(monthVar)
-            Dim count7 As Long, count14 As Long, count14Plus As Long, totalCount As Long, percentageLate As Double
-            count7 = 0: count14 = 0: count14Plus = 0
-
-            If dictMonthly7Days.Exists(nameKey) Then
-                If dictMonthly7Days(nameKey).Exists(monthKey) Then count7 = dictMonthly7Days(nameKey)(monthKey)
-            End If
-            If dictMonthly14Days.Exists(nameKey) Then
-                If dictMonthly14Days(nameKey).Exists(monthKey) Then count14 = dictMonthly14Days(nameKey)(monthKey)
-            End If
-            If dictMonthly14PlusDays.Exists(nameKey) Then
-                If dictMonthly14PlusDays(nameKey).Exists(monthKey) Then count14Plus = dictMonthly14PlusDays(nameKey)(monthKey)
-            End If
-
-            totalCount = count7 + count14 + count14Plus
-            If totalCount > 0 Then percentageLate = count14Plus / totalCount Else percentageLate = 0
-
-            ' Store data in dictionary organized by month
-            If Not monthlyData.Exists(monthKey) Then
-                Set monthlyData(monthKey) = CreateObject("Scripting.Dictionary")
-            End If
-
-            ' Create unique key with percentage for sorting
-            Dim dataKey As String
-            dataKey = Format(1 - percentageLate, "0.00000") & "_" & nameKey ' Inverse for descending sort
-
-            Set monthlyData(monthKey)(dataKey) = CreateObject("Scripting.Dictionary")
-            monthlyData(monthKey)(dataKey)("Name") = nameKey
-            monthlyData(monthKey)(dataKey)("Count7") = count7
-            monthlyData(monthKey)(dataKey)("Count14") = count14
-            monthlyData(monthKey)(dataKey)("Count14Plus") = count14Plus
-            monthlyData(monthKey)(dataKey)("PercentageLate") = percentageLate
-        Next monthVar
-    Next nameVar
-
-    ' Output monthly data grouped by month and sorted by percentage late
-    Dim monthKeys() As String
-    Dim monthCount As Long
-    monthCount = monthlyData.Count
-
-    If monthCount > 0 Then
-        ReDim monthKeys(0 To monthCount - 1)
-        Dim idx As Long
-        idx = 0
-        For Each monthVar In monthlyData.Keys
-            monthKeys(idx) = CStr(monthVar)
-            idx = idx + 1
-        Next monthVar
-
-        ' Sort months
-        Dim tempMonth As String
-        Dim j As Long
-        For idx = 0 To monthCount - 2
-            For j = idx + 1 To monthCount - 1
-                If monthKeys(idx) > monthKeys(j) Then
-                    tempMonth = monthKeys(idx)
-                    monthKeys(idx) = monthKeys(j)
-                    monthKeys(j) = tempMonth
-                End If
-            Next j
-        Next idx
-
-        ' Output each month's data
-        For idx = 0 To monthCount - 1
-            monthKey = monthKeys(idx)
-
-            ' Add month header
-            wsOutput.Cells(outputRow, 1).Value = "Month: " & monthKey
-            With wsOutput.Range(wsOutput.Cells(outputRow, 1), wsOutput.Cells(outputRow, 6))
-                .Merge
-                .Font.Bold = True
-                .Font.Size = 12
-                .Interior.Color = RGB(180, 180, 180)
-                .HorizontalAlignment = xlCenter
-            End With
-            outputRow = outputRow + 1
-
-            ' Add column headers for this month
-            wsOutput.Cells(outputRow, 1).Value = "Name"
-            wsOutput.Cells(outputRow, 2).Value = "Period"
-            wsOutput.Cells(outputRow, 3).Value = "<= 7 Days"
-            wsOutput.Cells(outputRow, 4).Value = "<= 14 Days"
-            wsOutput.Cells(outputRow, 5).Value = "> 14 Days"
-            wsOutput.Cells(outputRow, 6).Value = "Percentage Late"
-            With wsOutput.Range("A" & outputRow & ":F" & outputRow)
-                .Font.Bold = True
-                .Interior.Color = RGB(220, 220, 220)
-            End With
-            outputRow = outputRow + 1
-
-            ' Variables for month totals
-            Dim monthTotal7 As Long, monthTotal14 As Long, monthTotal14Plus As Long
-            monthTotal7 = 0: monthTotal14 = 0: monthTotal14Plus = 0
-
-            ' Get sorted keys for this month
-            Dim sortedKeys() As String
-            Dim keyCount As Long
-            keyCount = monthlyData(monthKey).Count
-
-            If keyCount > 0 Then
-                ReDim sortedKeys(0 To keyCount - 1)
-                Dim keyIdx As Long
-                keyIdx = 0
-                Dim dataKeyVar As Variant
-                For Each dataKeyVar In monthlyData(monthKey).Keys
-                    sortedKeys(keyIdx) = CStr(dataKeyVar)
-                    keyIdx = keyIdx + 1
-                Next dataKeyVar
-
-                ' Sort keys (already formatted for proper sorting)
-                Dim tempKey As String
-                Dim k As Long
-                For keyIdx = 0 To keyCount - 2
-                    For k = keyIdx + 1 To keyCount - 1
-                        If sortedKeys(keyIdx) > sortedKeys(k) Then
-                            tempKey = sortedKeys(keyIdx)
-                            sortedKeys(keyIdx) = sortedKeys(k)
-                            sortedKeys(k) = tempKey
-                        End If
-                    Next k
-                Next keyIdx
-
-                ' Output sorted data for this month
-                For keyIdx = 0 To keyCount - 1
-                    Dim dataDict As Object
-                    Set dataDict = monthlyData(monthKey)(sortedKeys(keyIdx))
-
-                    wsOutput.Cells(outputRow, 1).Value = dataDict("Name")
-                    wsOutput.Cells(outputRow, 2).Value = monthKey
-                    wsOutput.Cells(outputRow, 3).Value = dataDict("Count7")
-                    wsOutput.Cells(outputRow, 4).Value = dataDict("Count14")
-                    wsOutput.Cells(outputRow, 5).Value = dataDict("Count14Plus")
-                    wsOutput.Cells(outputRow, 6).Value = dataDict("PercentageLate")
-                    wsOutput.Cells(outputRow, 6).NumberFormat = "0.00%"
-
-                    ' Add to totals
-                    monthTotal7 = monthTotal7 + dataDict("Count7")
-                    monthTotal14 = monthTotal14 + dataDict("Count14")
-                    monthTotal14Plus = monthTotal14Plus + dataDict("Count14Plus")
-
-                    ' Highlight high late percentages
-                    If dataDict("PercentageLate") > 0.5 Then
-                        wsOutput.Cells(outputRow, 6).Font.Color = RGB(255, 0, 0)
-                    ElseIf dataDict("PercentageLate") > 0.25 Then
-                        wsOutput.Cells(outputRow, 6).Font.Color = RGB(255, 128, 0)
-                    End If
-
-                    outputRow = outputRow + 1
-                Next keyIdx
-
-                ' Add totals row
-                wsOutput.Cells(outputRow, 1).Value = "TOTAL"
-                wsOutput.Cells(outputRow, 2).Value = monthKey
-                wsOutput.Cells(outputRow, 3).Value = monthTotal7
-                wsOutput.Cells(outputRow, 4).Value = monthTotal14
-                wsOutput.Cells(outputRow, 5).Value = monthTotal14Plus
-                Dim monthGrandTotal As Long
-                monthGrandTotal = monthTotal7 + monthTotal14 + monthTotal14Plus
-                If monthGrandTotal > 0 Then
-                    wsOutput.Cells(outputRow, 6).Value = monthTotal14Plus / monthGrandTotal
-                Else
-                    wsOutput.Cells(outputRow, 6).Value = 0
-                End If
-                wsOutput.Cells(outputRow, 6).NumberFormat = "0.00%"
-
-                ' Format totals row
-                With wsOutput.Range("A" & outputRow & ":F" & outputRow)
-                    .Font.Bold = True
-                    .Interior.Color = RGB(240, 240, 240)
-                    .Borders(xlEdgeTop).LineStyle = xlContinuous
-                End With
-
-                outputRow = outputRow + 1
-            End If
-
-            ' Add empty row after each month group
-            outputRow = outputRow + 1
-        Next idx
-    End If
-
-    ' Clean up
-    Set monthlyData = Nothing
-
-    Dim chartDataStartRow As Long
-    chartDataStartRow = 2
-    Dim chartDataEndRow As Long
-    chartDataEndRow = outputRow - 1
-
-    outputRow = outputRow + 2 ' Add separation
-
-    ' Weekly data headers
-    wsOutput.Cells(outputRow, 1).Value = "Name"
-    wsOutput.Cells(outputRow, 2).Value = "Period"
-    wsOutput.Cells(outputRow, 3).Value = "<= 7 Days"
-    wsOutput.Cells(outputRow, 4).Value = "<= 14 Days"
-    wsOutput.Cells(outputRow, 5).Value = "> 14 Days"
-    wsOutput.Cells(outputRow, 6).Value = "Percentage Late"
-
-    ' Format headers
-    With wsOutput.Range("A" & outputRow & ":F" & outputRow)
-        .Font.Bold = True
-        .Interior.Color = RGB(200, 200, 200)
-    End With
-    outputRow = outputRow + 1
-
-    ' Process weekly data - collect and organize by month/week
-    Dim weeklyData As Object
-    Set weeklyData = CreateObject("Scripting.Dictionary")
-
-    For Each nameVar In allNames.Keys
-        nameKey = CStr(nameVar)
-        Set allWeeks = CreateObject("Scripting.Dictionary")
-
-        If dictWeekly7Days.Exists(nameKey) Then
-            For Each subKeyVar In dictWeekly7Days(nameKey).Keys: allWeeks(subKeyVar) = True: Next
-        End If
-        If dictWeekly14Days.Exists(nameKey) Then
-            For Each subKeyVar In dictWeekly14Days(nameKey).Keys: allWeeks(subKeyVar) = True: Next
-        End If
-        If dictWeekly14PlusDays.Exists(nameKey) Then
-            For Each subKeyVar In dictWeekly14PlusDays(nameKey).Keys: allWeeks(subKeyVar) = True: Next
-        End If
-
-        For Each weekVar In allWeeks.Keys
-            Dim weekKey As String
-            weekKey = CStr(weekVar)
-
-            ' Extract month from week key (format: YYYY-MM_Week_N)
-            Dim weekMonth As String
-            weekMonth = Left(weekKey, 7) ' Get YYYY-MM part
-
-            Dim weekCount7 As Long, weekCount14 As Long, weekCount14Plus As Long
-            weekCount7 = 0: weekCount14 = 0: weekCount14Plus = 0
-
-            If dictWeekly7Days.Exists(nameKey) Then
-                If dictWeekly7Days(nameKey).Exists(weekKey) Then weekCount7 = dictWeekly7Days(nameKey)(weekKey)
-            End If
-            If dictWeekly14Days.Exists(nameKey) Then
-                If dictWeekly14Days(nameKey).Exists(weekKey) Then weekCount14 = dictWeekly14Days(nameKey)(weekKey)
-            End If
-            If dictWeekly14PlusDays.Exists(nameKey) Then
-                If dictWeekly14PlusDays(nameKey).Exists(weekKey) Then weekCount14Plus = dictWeekly14PlusDays(nameKey)(weekKey)
-            End If
-
-            totalCount = weekCount7 + weekCount14 + weekCount14Plus
-            If totalCount > 0 Then percentageLate = weekCount14Plus / totalCount Else percentageLate = 0
-
-            ' Store data organized by month
-            If Not weeklyData.Exists(weekMonth) Then
-                Set weeklyData(weekMonth) = CreateObject("Scripting.Dictionary")
-            End If
-
-            ' Create unique key with percentage for sorting
-            Dim weekDataKey As String
-            weekDataKey = Format(1 - percentageLate, "0.00000") & "_" & weekKey & "_" & nameKey
-
-            Set weeklyData(weekMonth)(weekDataKey) = CreateObject("Scripting.Dictionary")
-            weeklyData(weekMonth)(weekDataKey)("Name") = nameKey
-            weeklyData(weekMonth)(weekDataKey)("Week") = Replace(weekKey, "_", " ")
-            weeklyData(weekMonth)(weekDataKey)("Count7") = weekCount7
-            weeklyData(weekMonth)(weekDataKey)("Count14") = weekCount14
-            weeklyData(weekMonth)(weekDataKey)("Count14Plus") = weekCount14Plus
-            weeklyData(weekMonth)(weekDataKey)("PercentageLate") = percentageLate
-        Next weekVar
-    Next nameVar
-
-    ' Output weekly data grouped by month and sorted by percentage late
-    Dim weekMonthKeys() As String
-    Dim weekMonthCount As Long
-    weekMonthCount = weeklyData.Count
-
-    If weekMonthCount > 0 Then
-        ReDim weekMonthKeys(0 To weekMonthCount - 1)
-        idx = 0
-        For Each monthVar In weeklyData.Keys
-            weekMonthKeys(idx) = CStr(monthVar)
-            idx = idx + 1
-        Next monthVar
-
-        ' Sort months
-        For idx = 0 To weekMonthCount - 2
-            For j = idx + 1 To weekMonthCount - 1
-                If weekMonthKeys(idx) > weekMonthKeys(j) Then
-                    tempMonth = weekMonthKeys(idx)
-                    weekMonthKeys(idx) = weekMonthKeys(j)
-                    weekMonthKeys(j) = tempMonth
-                End If
-            Next j
-        Next idx
-
-        ' Output each month's weekly data
-        For idx = 0 To weekMonthCount - 1
-            Dim weekMonthKey As String
-            weekMonthKey = weekMonthKeys(idx)
-
-            ' Add month header for weekly data
-            wsOutput.Cells(outputRow, 1).Value = "Month: " & weekMonthKey & " (Weekly Breakdown)"
-            With wsOutput.Range(wsOutput.Cells(outputRow, 1), wsOutput.Cells(outputRow, 6))
-                .Merge
-                .Font.Bold = True
-                .Font.Size = 12
-                .Interior.Color = RGB(180, 180, 180)
-                .HorizontalAlignment = xlCenter
-            End With
-            outputRow = outputRow + 1
-
-            ' Add column headers for this month's weekly data
-            wsOutput.Cells(outputRow, 1).Value = "Name"
-            wsOutput.Cells(outputRow, 2).Value = "Period"
-            wsOutput.Cells(outputRow, 3).Value = "<= 7 Days"
-            wsOutput.Cells(outputRow, 4).Value = "<= 14 Days"
-            wsOutput.Cells(outputRow, 5).Value = "> 14 Days"
-            wsOutput.Cells(outputRow, 6).Value = "Percentage Late"
-            With wsOutput.Range("A" & outputRow & ":F" & outputRow)
-                .Font.Bold = True
-                .Interior.Color = RGB(220, 220, 220)
-            End With
-            outputRow = outputRow + 1
-
-            ' Variables for weekly totals
-            Dim weekTotal7 As Long, weekTotal14 As Long, weekTotal14Plus As Long
-            weekTotal7 = 0: weekTotal14 = 0: weekTotal14Plus = 0
-
-            ' Get sorted keys for this month's weeks
-            Dim weekSortedKeys() As String
-            Dim weekKeyCount As Long
-            weekKeyCount = weeklyData(weekMonthKey).Count
-
-            If weekKeyCount > 0 Then
-                ReDim weekSortedKeys(0 To weekKeyCount - 1)
-                Dim weekKeyIdx As Long
-                weekKeyIdx = 0
-                For Each dataKeyVar In weeklyData(weekMonthKey).Keys
-                    weekSortedKeys(weekKeyIdx) = CStr(dataKeyVar)
-                    weekKeyIdx = weekKeyIdx + 1
-                Next dataKeyVar
-
-                ' Sort keys
-                For weekKeyIdx = 0 To weekKeyCount - 2
-                    For k = weekKeyIdx + 1 To weekKeyCount - 1
-                        If weekSortedKeys(weekKeyIdx) > weekSortedKeys(k) Then
-                            tempKey = weekSortedKeys(weekKeyIdx)
-                            weekSortedKeys(weekKeyIdx) = weekSortedKeys(k)
-                            weekSortedKeys(k) = tempKey
-                        End If
-                    Next k
-                Next weekKeyIdx
-
-                ' Output sorted weekly data for this month
-                For weekKeyIdx = 0 To weekKeyCount - 1
-                    Dim weekDataDict As Object
-                    Set weekDataDict = weeklyData(weekMonthKey)(weekSortedKeys(weekKeyIdx))
-
-                    wsOutput.Cells(outputRow, 1).Value = weekDataDict("Name")
-                    wsOutput.Cells(outputRow, 2).Value = weekDataDict("Week")
-                    wsOutput.Cells(outputRow, 3).Value = weekDataDict("Count7")
-                    wsOutput.Cells(outputRow, 4).Value = weekDataDict("Count14")
-                    wsOutput.Cells(outputRow, 5).Value = weekDataDict("Count14Plus")
-                    wsOutput.Cells(outputRow, 6).Value = weekDataDict("PercentageLate")
-                    wsOutput.Cells(outputRow, 6).NumberFormat = "0.00%"
-
-                    ' Add to totals
-                    weekTotal7 = weekTotal7 + weekDataDict("Count7")
-                    weekTotal14 = weekTotal14 + weekDataDict("Count14")
-                    weekTotal14Plus = weekTotal14Plus + weekDataDict("Count14Plus")
-
-                    ' Highlight high late percentages
-                    If weekDataDict("PercentageLate") > 0.5 Then
-                        wsOutput.Cells(outputRow, 6).Font.Color = RGB(255, 0, 0)
-                    ElseIf weekDataDict("PercentageLate") > 0.25 Then
-                        wsOutput.Cells(outputRow, 6).Font.Color = RGB(255, 128, 0)
-                    End If
-
-                    outputRow = outputRow + 1
-                Next weekKeyIdx
-
-                ' Add totals row
-                wsOutput.Cells(outputRow, 1).Value = "TOTAL"
-                wsOutput.Cells(outputRow, 2).Value = weekMonthKey
-                wsOutput.Cells(outputRow, 3).Value = weekTotal7
-                wsOutput.Cells(outputRow, 4).Value = weekTotal14
-                wsOutput.Cells(outputRow, 5).Value = weekTotal14Plus
-                Dim weekGrandTotal As Long
-                weekGrandTotal = weekTotal7 + weekTotal14 + weekTotal14Plus
-                If weekGrandTotal > 0 Then
-                    wsOutput.Cells(outputRow, 6).Value = weekTotal14Plus / weekGrandTotal
-                Else
-                    wsOutput.Cells(outputRow, 6).Value = 0
-                End If
-                wsOutput.Cells(outputRow, 6).NumberFormat = "0.00%"
-
-                ' Format totals row
-                With wsOutput.Range("A" & outputRow & ":F" & outputRow)
-                    .Font.Bold = True
-                    .Interior.Color = RGB(240, 240, 240)
-                    .Borders(xlEdgeTop).LineStyle = xlContinuous
-                End With
-
-                outputRow = outputRow + 1
-            End If
-
-            ' Add empty row after each month group
-            outputRow = outputRow + 1
-        Next idx
-    End If
-
-    ' Clean up
-    Set weeklyData = Nothing
-
-    outputRow = outputRow + 2 ' Add separation
-
-    ' Probability summary headers
-    wsOutput.Cells(outputRow, 1).Value = "Name"
-    wsOutput.Cells(outputRow, 2).Value = "Prob. <= 7 Days"
-    wsOutput.Cells(outputRow, 3).Value = "Prob. <= 14 Days"
-    wsOutput.Cells(outputRow, 4).Value = "Prob. > 14 Days"
-
-    ' Format headers
-    With wsOutput.Range("A" & outputRow & ":D" & outputRow)
-        .Font.Bold = True
-        .Interior.Color = RGB(200, 200, 200)
-    End With
-    outputRow = outputRow + 1
-
-    ' Process probability summary
-    For Each nameVar In dictTotalCounts.Keys
-        nameKey = CStr(nameVar)
-        Dim totalCountAll As Long
-        totalCountAll = dictTotalCounts(nameKey)("Less7") + dictTotalCounts(nameKey)("Less14") + dictTotalCounts(nameKey)("Greater14")
-
-        If totalCountAll > 0 Then
-            wsOutput.Cells(outputRow, 1).Value = nameKey
-            wsOutput.Cells(outputRow, 2).Value = dictTotalCounts(nameKey)("Less7") / totalCountAll
-            wsOutput.Cells(outputRow, 3).Value = dictTotalCounts(nameKey)("Less14") / totalCountAll
-            wsOutput.Cells(outputRow, 4).Value = dictTotalCounts(nameKey)("Greater14") / totalCountAll
-            wsOutput.Cells(outputRow, 2).NumberFormat = "0.00%"
-            wsOutput.Cells(outputRow, 3).NumberFormat = "0.00%"
-            wsOutput.Cells(outputRow, 4).NumberFormat = "0.00%"
-        End If
+    
+    ' Loop through each month and create a section
+    For idx = 0 To UBound(sortedMonths)
+        monthKey = sortedMonths(idx)
+        
+        ' Month section header
+        wsOutput.Cells(outputRow, 1).Value = "Month: " & monthKey
+        With wsOutput.Range(wsOutput.Cells(outputRow, 1), wsOutput.Cells(outputRow, 6))
+            .Merge
+            .Font.Bold = True
+            .Font.Size = 12
+            .Interior.Color = RGB(180, 180, 180)
+            .HorizontalAlignment = xlCenter
+        End With
         outputRow = outputRow + 1
-    Next nameVar
-
-    ' --- Create the Line Chart ---
-    If chartDataEndRow >= chartDataStartRow Then
-        On Error Resume Next
-        Dim chartRange As Range
-        Dim ch As ChartObject
-        Dim seriesCount As Long
-        Dim chartData As Range
-
-        ' Add a chart to the worksheet
-        Set ch = wsOutput.ChartObjects.Add(Left:=50, Top:=wsOutput.Cells(outputRow + 2, 1).Top, Width:=CHART_WIDTH, Height:=CHART_HEIGHT)
-
-        If Not ch Is Nothing Then
-            ' Set the chart properties
-            With ch.Chart
-                .ChartType = xlLine
-                .HasTitle = True
-                .ChartTitle.Text = "Percentage Late by Month"
-                .Axes(xlCategory, xlPrimary).HasTitle = True
-                .Axes(xlCategory, xlPrimary).AxisTitle.Text = "Month"
-                .Axes(xlValue, xlPrimary).HasTitle = True
-                .Axes(xlValue, xlPrimary).AxisTitle.Text = "Percentage Late"
-                .Axes(xlValue).MaximumScale = 1 ' Set Y-axis to 0-100%
-                .Axes(xlValue).MinimumScale = 0
-            End With
-
-            ' Clear any default series
-            Do While ch.Chart.SeriesCollection.Count > 0
-                ch.Chart.SeriesCollection(1).Delete
-            Loop
-
-            ' Create a dictionary to collect data by name across all months
-            Dim chartDataDict As Object
-            Set chartDataDict = CreateObject("Scripting.Dictionary")
-
-            ' Collect all unique names and months for the chart
-            Dim uniqueNames As Object
-            Set uniqueNames = CreateObject("Scripting.Dictionary")
-            Dim uniqueMonths As Object
-            Set uniqueMonths = CreateObject("Scripting.Dictionary")
-
-            ' Read through the monthly data section to build chart data
-            Dim chartRow As Long
-            For chartRow = 2 To chartDataEndRow
-                ' Skip header rows, total rows, and empty rows
-                If wsOutput.Cells(chartRow, 1).Value <> "" And _
-                   wsOutput.Cells(chartRow, 1).Value <> "Name" And _
-                   wsOutput.Cells(chartRow, 1).Value <> "TOTAL" And _
-                   InStr(wsOutput.Cells(chartRow, 1).Value, "Month:") = 0 Then
-
-                    Dim chartName As String
-                    Dim chartMonth As String
-                    Dim chartPercentage As Double
-
-                    chartName = wsOutput.Cells(chartRow, 1).Value
-                    chartMonth = wsOutput.Cells(chartRow, 2).Value
-                    chartPercentage = wsOutput.Cells(chartRow, 6).Value
-
-                    ' Store unique names and months
-                    uniqueNames(chartName) = True
-                    uniqueMonths(chartMonth) = True
-
-                    ' Store data in nested dictionary
-                    If Not chartDataDict.Exists(chartName) Then
-                        Set chartDataDict(chartName) = CreateObject("Scripting.Dictionary")
-                    End If
-                    chartDataDict(chartName)(chartMonth) = chartPercentage
-                End If
-            Next chartRow
-
-            ' Sort months for x-axis
-            Dim sortedMonths() As String
-            Dim monthIdx As Long
-            ReDim sortedMonths(0 To uniqueMonths.Count - 1)
-            monthIdx = 0
-            Dim monthItem As Variant
-            For Each monthItem In uniqueMonths.Keys
-                sortedMonths(monthIdx) = CStr(monthItem)
-                monthIdx = monthIdx + 1
-            Next monthItem
-
-            ' Sort the months array
-            Dim m As Long, n As Long
-            For m = 0 To UBound(sortedMonths) - 1
-                For n = m + 1 To UBound(sortedMonths)
-                    If sortedMonths(m) > sortedMonths(n) Then
-                        Dim tempSortMonth As String
-                        tempSortMonth = sortedMonths(m)
-                        sortedMonths(m) = sortedMonths(n)
-                        sortedMonths(n) = tempSortMonth
-                    End If
-                Next n
-            Next m
-
-            ' Create a series for each unique name
-            Dim nameItem As Variant
-            For Each nameItem In uniqueNames.Keys
-                Dim seriesName As String
-                seriesName = CStr(nameItem)
-
-                If chartDataDict.Exists(seriesName) Then
-                    ' Build arrays for this series
-                    Dim seriesValues() As Double
-                    ReDim seriesValues(0 To UBound(sortedMonths))
-
-                    Dim hasData As Boolean
-                    hasData = False
-
-                    For monthIdx = 0 To UBound(sortedMonths)
-                        If chartDataDict(seriesName).Exists(sortedMonths(monthIdx)) Then
-                            seriesValues(monthIdx) = chartDataDict(seriesName)(sortedMonths(monthIdx))
-                            hasData = True
-                        Else
-                            ' No data for this month - use 0 or skip
-                            seriesValues(monthIdx) = 0
-                        End If
-                    Next monthIdx
-
-                    ' Only add series if it has data
-                    If hasData Then
-                        With ch.Chart.SeriesCollection.NewSeries
-                            .Name = seriesName
-                            .XValues = sortedMonths
-                            .Values = seriesValues
-                            .MarkerStyle = xlMarkerStyleCircle
-                            .MarkerSize = 5
-                        End With
-                    End If
-                End If
-            Next nameItem
-
-            ' Format the chart
-            With ch.Chart
-                .Legend.Position = xlLegendPositionRight
-                .PlotArea.Border.LineStyle = xlContinuous
-                .PlotArea.Border.Color = RGB(200, 200, 200)
-            End With
-
-            ' Clean up chart dictionary
-            Set chartDataDict = Nothing
-            Set uniqueNames = Nothing
-            Set uniqueMonths = Nothing
+        
+        ' Track monthly totals across all people
+        Dim monthTotal7 As Long, monthTotal14 As Long, monthTotal14Plus As Long
+        monthTotal7 = 0: monthTotal14 = 0: monthTotal14Plus = 0
+        
+        ' Loop through each person for this month
+        For nameIdx = 0 To UBound(nameKeys)
+            nameKey = nameKeys(nameIdx)
+            
+            ' Get counts for this person in this month
+            count7 = 0: count14 = 0: count14Plus = 0
+            If dictMonthly7Days.Exists(nameKey) And dictMonthly7Days(nameKey).Exists(monthKey) Then count7 = dictMonthly7Days(nameKey)(monthKey)
+            If dictMonthly14Days.Exists(nameKey) And dictMonthly14Days(nameKey).Exists(monthKey) Then count14 = dictMonthly14Days(nameKey)(monthKey)
+            If dictMonthly14PlusDays.Exists(nameKey) And dictMonthly14PlusDays(nameKey).Exists(monthKey) Then count14Plus = dictMonthly14PlusDays(nameKey)(monthKey)
+            
+            totalCount = count7 + count14 + count14Plus
+            
+            ' Only write row if person had tasks this month
+            If totalCount > 0 Then
+                wsOutput.Cells(outputRow, 1).Value = nameKey
+                wsOutput.Cells(outputRow, 2).Value = monthKey
+                wsOutput.Cells(outputRow, 3).Value = count7
+                wsOutput.Cells(outputRow, 4).Value = count14
+                wsOutput.Cells(outputRow, 5).Value = count14Plus
+                
+                ' Calculate on-time percentage (7 days + 14 days = acceptable)
+                percentageOnTime = (count7 + count14) / totalCount
+                wsOutput.Cells(outputRow, 6).Value = percentageOnTime
+                wsOutput.Cells(outputRow, 6).NumberFormat = "0.00%"
+                
+                ' Add to monthly totals
+                monthTotal7 = monthTotal7 + count7
+                monthTotal14 = monthTotal14 + count14
+                monthTotal14Plus = monthTotal14Plus + count14Plus
+                
+                outputRow = outputRow + 1
+            End If
+        Next nameIdx
+        
+        ' Write monthly total row
+        wsOutput.Cells(outputRow, 1).Value = "TOTAL"
+        wsOutput.Cells(outputRow, 2).Value = monthKey
+        wsOutput.Cells(outputRow, 3).Value = monthTotal7
+        wsOutput.Cells(outputRow, 4).Value = monthTotal14
+        wsOutput.Cells(outputRow, 5).Value = monthTotal14Plus
+        
+        ' Calculate monthly total percentage
+        Dim monthGrandTotal As Long
+        monthGrandTotal = monthTotal7 + monthTotal14 + monthTotal14Plus
+        If monthGrandTotal > 0 Then
+            wsOutput.Cells(outputRow, 6).Value = (monthTotal7 + monthTotal14) / monthGrandTotal
+        Else
+            wsOutput.Cells(outputRow, 6).Value = 0
         End If
-        On Error GoTo 0
-    End If
+        wsOutput.Cells(outputRow, 6).NumberFormat = "0.00%"
+        
+        ' Format total row
+        With wsOutput.Range("A" & outputRow & ":F" & outputRow)
+            .Font.Bold = True
+            .Interior.Color = RGB(240, 240, 240)
+            .Borders(xlEdgeTop).LineStyle = xlContinuous
+        End With
+        
+        outputRow = outputRow + 2 ' Leave space between months
+    Next idx
+    
+    ' =============================================================================
+    ' CREATE CHART DATA TABLE - Restructure data for charting
+    ' =============================================================================
+    
+    ' Add space and create chart data section
+    Dim chartTableStartRow As Long
+    chartTableStartRow = outputRow + 2
+    
+    ' Chart data section header
+    wsOutput.Cells(chartTableStartRow, 1).Value = "Chart Data Table:"
+    With wsOutput.Cells(chartTableStartRow, 1)
+        .Font.Bold = True
+        .Font.Size = 12
+    End With
+    chartTableStartRow = chartTableStartRow + 1
+    
+    ' Chart data table headers: Month, Person1, Person2, etc.
+    wsOutput.Cells(chartTableStartRow, 1).Value = "Month"
+    For nameIdx = 0 To UBound(nameKeys)
+        wsOutput.Cells(chartTableStartRow, nameIdx + 2).Value = nameKeys(nameIdx)
+    Next nameIdx
+    
+    ' Format chart table headers
+    With wsOutput.Range(wsOutput.Cells(chartTableStartRow, 1), wsOutput.Cells(chartTableStartRow, UBound(nameKeys) + 2))
+        .Font.Bold = True
+        .Interior.Color = RGB(200, 200, 200)
+        .Borders.LineStyle = xlContinuous
+    End With
+    
+    ' Fill chart data table - each row is a month, each column is a person
+    Dim dataStartRow As Long, dataRowCount As Long
+    dataStartRow = chartTableStartRow + 1
+    dataRowCount = 0
+    
+    For idx = 0 To UBound(sortedMonths)
+        monthKey = sortedMonths(idx)
+        dataRowCount = dataRowCount + 1
+        Dim currentDataRow As Long
+        currentDataRow = dataStartRow + dataRowCount - 1
+        
+        ' First column: Month name
+        wsOutput.Cells(currentDataRow, 1).Value = monthKey
+        
+        ' Remaining columns: Each person's on-time percentage for this month
+        For nameIdx = 0 To UBound(nameKeys)
+            nameKey = nameKeys(nameIdx)
+            
+            ' Get counts for this person/month combination
+            count7 = 0: count14 = 0: count14Plus = 0
+            If dictMonthly7Days.Exists(nameKey) And dictMonthly7Days(nameKey).Exists(monthKey) Then count7 = dictMonthly7Days(nameKey)(monthKey)
+            If dictMonthly14Days.Exists(nameKey) And dictMonthly14Days(nameKey).Exists(monthKey) Then count14 = dictMonthly14Days(nameKey)(monthKey)
+            If dictMonthly14PlusDays.Exists(nameKey) And dictMonthly14PlusDays(nameKey).Exists(monthKey) Then count14Plus = dictMonthly14PlusDays(nameKey)(monthKey)
+            
+            totalCount = count7 + count14 + count14Plus
+            If totalCount > 0 Then
+                ' Calculate on-time percentage
+                percentageOnTime = CDbl((count7 + count14)) / CDbl(totalCount)
+                wsOutput.Cells(currentDataRow, nameIdx + 2).Value = percentageOnTime
+                wsOutput.Cells(currentDataRow, nameIdx + 2).NumberFormat = "0.00%"
+            Else
+                ' No data for this person/month - show 0%
+                wsOutput.Cells(currentDataRow, nameIdx + 2).Value = 0
+                wsOutput.Cells(currentDataRow, nameIdx + 2).NumberFormat = "0.00%"
+            End If
+        Next nameIdx
+    Next idx
+    
+    ' Add borders around chart data table
+    With wsOutput.Range(wsOutput.Cells(chartTableStartRow, 1), wsOutput.Cells(dataStartRow + dataRowCount - 1, UBound(nameKeys) + 2))
+        .Borders.LineStyle = xlContinuous
+        .Borders.Weight = xlThin
+    End With
+    
+    ' =============================================================================
+    ' CREATE CHART - Visual representation of the data
+    ' =============================================================================
+    
+    ' Define the data range for the chart (the table we just created)
+    Set chartDataRange = wsOutput.Range(wsOutput.Cells(chartTableStartRow, 1), wsOutput.Cells(dataStartRow + dataRowCount - 1, UBound(nameKeys) + 2))
+    
+    ' Create chart below the data table
+    Dim chartTop As Long
+    chartTop = wsOutput.Cells(dataStartRow + dataRowCount + 2, 1).Top
+    Set co = wsOutput.ChartObjects.Add(Left:=50, Top:=chartTop, Width:=600, Height:=300)
+    
+    ' Configure the chart
+    With co.Chart
+        .ChartType = xlColumnClustered                      ' Clustered column chart (grouped bars)
+        .SetSourceData Source:=chartDataRange, PlotBy:=xlColumns ' Each column (person) becomes a data series
+        
+        ' Chart title
+        .HasTitle = True
+        .ChartTitle.Text = "On-Time Percentage by Month and Name"
+        
+        ' X-axis (shows months)
+        With .Axes(xlCategory, xlPrimary)
+            .HasTitle = True
+            .AxisTitle.Text = "Month"
+            .TickLabels.Orientation = 45 ' Rotate labels for better readability
+        End With
+        
+        ' Y-axis (shows percentages)
+        With .Axes(xlValue, xlPrimary)
+            .HasTitle = True
+            .AxisTitle.Text = "Percentage On Time"
+            .TickLabels.NumberFormat = "0%" ' Show as percentages
+            .MinimumScale = 0
+            .MaximumScale = 1
+        End With
+        
+        ' Legend (shows which color = which person)
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionRight
+        
+        ' Color each data series (person) with different colors
+        If .SeriesCollection.Count > 0 Then
+            For seriesIndex = 1 To .SeriesCollection.Count
+                With .SeriesCollection(seriesIndex)
+                    ' Set the series name to the person's name
+                    .name = nameKeys(seriesIndex - 1)
+                    
+                    ' Apply a unique color (cycle through 15 colors, then generate more)
+                    colorIndex = ((seriesIndex - 1) Mod 15) + 1
+                    Select Case colorIndex
+                        Case 1: .Interior.Color = RGB(68, 114, 196)    ' Blue
+                        Case 2: .Interior.Color = RGB(237, 125, 49)    ' Orange
+                        Case 3: .Interior.Color = RGB(112, 173, 71)    ' Green
+                        Case 4: .Interior.Color = RGB(255, 192, 0)     ' Yellow
+                        Case 5: .Interior.Color = RGB(91, 155, 213)    ' Light Blue
+                        Case 6: .Interior.Color = RGB(165, 165, 165)   ' Gray
+                        Case 7: .Interior.Color = RGB(158, 72, 14)     ' Brown
+                        Case 8: .Interior.Color = RGB(99, 99, 99)      ' Dark Gray
+                        Case 9: .Interior.Color = RGB(153, 115, 0)     ' Olive
+                        Case 10: .Interior.Color = RGB(67, 104, 43)    ' Dark Green
+                        Case 11: .Interior.Color = RGB(196, 89, 17)    ' Dark Orange
+                        Case 12: .Interior.Color = RGB(142, 169, 219)  ' Periwinkle
+                        Case 13: .Interior.Color = RGB(255, 105, 180)  ' Hot Pink
+                        Case 14: .Interior.Color = RGB(32, 178, 170)   ' Light Sea Green
+                        Case 15: .Interior.Color = RGB(128, 0, 128)    ' Purple
+                        Case Else
+                            ' For more than 15 people, generate colors mathematically
+                            .Interior.Color = RGB((seriesIndex * 50) Mod 256, (seriesIndex * 80) Mod 256, (seriesIndex * 110) Mod 256)
+                    End Select
+                End With
+            Next seriesIndex
+        End If
+    End With
+    
+    ' =============================================================================
+    ' CLEANUP AND COMPLETION
+    ' =============================================================================
+    
+    ' Auto-fit all columns for better display
+    wsOutput.Columns("A:Z").AutoFit
+    
+    ' Turn screen updating back on
+    Application.ScreenUpdating = True
+    
+    ' Show completion message
+    MsgBox "Analysis complete!" & vbCrLf & _
+           "Date Range: " & Format(startDate, "MM/DD/YYYY") & " to " & Format(endDate, "MM/DD/YYYY") & vbCrLf & _
+           "Rows Processed: " & (lastRow - 1 - invalidRows) & vbCrLf & _
+           "Results are in the 'MonthlySummary' sheet.", vbInformation
+End Sub
 
-    ' Auto-fit columns
-    wsOutput.Columns("A:H").AutoFit
+' =============================================================================
+' HELPER FUNCTIONS
+' =============================================================================
 
-    ' Display summary message
-    Dim successMsg As String
-    successMsg = "Analysis complete!" & vbCrLf & vbCrLf
-    successMsg = successMsg & "Date Range: " & Format(startDate, "MM/DD/YYYY") & " to " & Format(endDate, "MM/DD/YYYY") & vbCrLf
-    successMsg = successMsg & "Rows Processed: " & (lastRow - 1 - invalidRows) & vbCrLf
-    If invalidRows > 0 Then
-        successMsg = successMsg & "Invalid Rows Skipped: " & invalidRows & vbCrLf
-    End If
-    successMsg = successMsg & vbCrLf & "Results are in the 'DateRangeSummary' sheet."
-
-    MsgBox successMsg, vbInformation, "Analysis Complete"
-
-    GoTo CleanUp
-
-' Error Handlers
-InvalidDateInput:
-    MsgBox "Invalid date format. Please enter dates in MM/DD/YYYY format.", vbExclamation, "Date Error"
-    GoTo CleanUp
-
-Canceled:
-    MsgBox "Operation canceled by user.", vbInformation, "Canceled"
-    GoTo CleanUp
-
-SheetError:
-    MsgBox "Error: The sheet named 'Data' was not found. Please ensure you have a sheet named 'Data' with the following columns:" & vbCrLf & _
-           "Column A: Names" & vbCrLf & _
-           "Column B: Start Dates" & vbCrLf & _
-           "Column C: End Dates", vbCritical, "Sheet Not Found"
-    GoTo CleanUp
-
-CleanUp:
-    ' Clean up dictionary objects
-    Set dictMonthly7Days = Nothing
-    Set dictMonthly14Days = Nothing
-    Set dictMonthly14PlusDays = Nothing
-    Set dictWeekly7Days = Nothing
-    Set dictWeekly14Days = Nothing
-    Set dictWeekly14PlusDays = Nothing
-    Set dictTotalCounts = Nothing
-    Set allNames = Nothing
-    Set allMonths = Nothing
-    Set allWeeks = Nothing
-
-    ' Clear status bar
-    Application.StatusBar = False
-
-    ' Restore original application settings
-    Application.ScreenUpdating = origScreenUpdating
-    Application.Calculation = origCalculation
-    Application.EnableEvents = origEnableEvents
+' Simple bubble sort to sort string arrays alphabetically/chronologically
+Sub SortStringArray(arr() As String)
+    Dim i As Long, j As Long, temp As String
+    For i = LBound(arr) To UBound(arr) - 1
+        For j = i + 1 To UBound(arr)
+            If arr(i) > arr(j) Then
+                temp = arr(i)
+                arr(i) = arr(j)
+                arr(j) = temp
+            End If
+        Next j
+    Next i
 End Sub
 
