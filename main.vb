@@ -15,7 +15,7 @@ Private Const NAME_COLUMN As String = "B"                ' Column containing per
 Private Const START_DATE_COLUMN As String = "C"          ' Column containing task start dates
 Private Const END_DATE_COLUMN As String = "D"            ' Column containing task end dates
 Private Const KEYWORD_COLUMN As String = "A"             ' Column containing keywords for filtering
-Private Const KEYWORD_TO_FILTER As String = "tech"       ' Filter by this keyword (leave empty for all)
+Private Const KEYWORD_TO_FILTER As String = "pizza"       ' Filter by this keyword (leave empty for all)
 Private Const DAYS_THRESHOLD_1 As Long = 7               ' "On time" threshold (days)
 Private Const DAYS_THRESHOLD_2 As Long = 14              ' "Acceptable" threshold (days)
 
